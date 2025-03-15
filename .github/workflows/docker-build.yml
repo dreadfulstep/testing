@@ -89,18 +89,40 @@ jobs:
           echo "SERVICE_ENTRY<<EOF" >> $GITHUB_ENV
           echo "$ENTRY" >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
+      
+      - name: Debug SSH Setup
+        run: |
+          echo "Checking SSH Agent Environment..."
+          env | grep SSH
+          echo "Checking SSH Directory Permissions..."
+          ls -lah ~/.ssh || echo "No .ssh directory found!"
+          echo "Checking SSH Known Hosts..."
+          cat ~/.ssh/known_hosts || echo "No known_hosts file!"
+          echo "Testing SSH Connection..."
+          ssh -v ${{ secrets.SSH_USER }}@${{ secrets.SERVER_IP }} "echo 'SSH Connection Successful'"
+
           
       - name: Setup SSH
         if: ${{ !(github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop') }}
         uses: webfactory/ssh-agent@v0.7.0
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+            
+      - name: Fix SSH Permissions & Create Directory
+        if: ${{ !(github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop') }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          ssh-keyscan -H ${{ secrets.SERVER_IP }} >> ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
           
       - name: Add known hosts
         if: ${{ !(github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop') }}
         run: |
           mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
           ssh-keyscan -H ${{ secrets.SERVER_IP }} >> ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
           
       - name: Update docker-compose.yml on server
         if: ${{ !(github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop') }}
