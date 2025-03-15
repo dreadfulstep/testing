@@ -1,0 +1,148 @@
+name: Build and Push Docker Image
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+      
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Extract metadata
+        id: meta
+        run: |
+          BRANCH=${GITHUB_REF#refs/heads/}
+          SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+          echo "short_sha=$SHORT_SHA" >> $GITHUB_OUTPUT
+          
+          # Set subdomain based on branch or commit
+          if [ "$BRANCH" = "main" ]; then
+            echo "subdomain=app" >> $GITHUB_OUTPUT
+            echo "domain=zylolabs.xyz" >> $GITHUB_OUTPUT
+            echo "service_name=app" >> $GITHUB_OUTPUT
+          elif [ "$BRANCH" = "develop" ]; then
+            echo "subdomain=dev" >> $GITHUB_OUTPUT
+            echo "domain=dev.zylolabs.xyz" >> $GITHUB_OUTPUT
+            echo "service_name=develop" >> $GITHUB_OUTPUT
+          else
+            echo "subdomain=$SHORT_SHA" >> $GITHUB_OUTPUT
+            echo "domain=$SHORT_SHA.zylolabs.xyz" >> $GITHUB_OUTPUT
+            echo "service_name=$SHORT_SHA" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.branch }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.short_sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.branch }}
+            app.kubernetes.io/name=${{ steps.meta.outputs.subdomain }}
+      
+      - name: Generate docker-compose entry
+        if: ${{ !(github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop') }}
+        run: |
+          echo "COMMIT_HASH=${{ steps.meta.outputs.short_sha }}" >> $GITHUB_ENV
+          ENTRY=$(cat <<EOF
+          ${{ steps.meta.outputs.service_name }}:
+            image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.short_sha }}
+            container_name: ecommerce-${{ steps.meta.outputs.short_sha }}
+            restart: always
+            networks:
+              - traefik-public
+            labels:
+              - "traefik.enable=true"
+              - "traefik.http.routers.${{ steps.meta.outputs.service_name }}.rule=Host(\`${{ steps.meta.outputs.domain }}\`)"
+              - "traefik.http.routers.${{ steps.meta.outputs.service_name }}.entrypoints=websecure"
+              - "traefik.http.routers.${{ steps.meta.outputs.service_name }}.tls.certresolver=letsencrypt"
+              - "traefik.http.services.${{ steps.meta.outputs.service_name }}.loadbalancer.server.port=3000"
+              - "com.centurylinklabs.watchtower.enable=true"
+          EOF
+          )
+          echo "SERVICE_ENTRY<<EOF" >> $GITHUB_ENV
+          echo "$ENTRY" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+          
+      - name: Setup SSH
+        if: ${{ !(github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop') }}
+        uses: webfactory/ssh-agent@v0.7.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+          
+      - name: Add known hosts
+        if: ${{ !(github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop') }}
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ secrets.SERVER_IP }} >> ~/.ssh/known_hosts
+          
+      - name: Update docker-compose.yml on server
+        if: ${{ !(github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop') }}
+        run: |
+          echo "$SERVICE_ENTRY" > service_entry.txt
+          
+          scp service_entry.txt ${{ secrets.SSH_USER }}@${{ secrets.SERVER_IP }}:/tmp/service_entry.txt
+          
+          ssh ${{ secrets.SSH_USER }}@${{ secrets.SERVER_IP }} "
+            if grep -q \"${{ steps.meta.outputs.service_name }}:\" /home/${{ secrets.SSH_USER }}/docker-compose.yml; then
+              echo 'Service already exists in docker-compose.yml'
+            else
+              sed -i '/^networks:/i \\n  ${{ steps.meta.outputs.service_name }}:' /home/${{ secrets.SSH_USER }}/docker-compose.yml
+              sed -i '/^  ${{ steps.meta.outputs.service_name }}:/r /tmp/service_entry.txt' /home/${{ secrets.SSH_USER }}/docker-compose.yml
+              sed -i '/^  ${{ steps.meta.outputs.service_name }}:/d' /home/${{ secrets.SSH_USER }}/docker-compose.yml
+              
+              cd /home/${{ secrets.SSH_USER }}/ && docker compose up -d ${{ steps.meta.outputs.service_name }}
+              
+              echo 'Deployed ${{ steps.meta.outputs.domain }}'
+            fi
+          "
+          
+      - name: Update main/develop on server
+        if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop' }}
+        uses: webfactory/ssh-agent@v0.7.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+      
+      - name: Add known hosts for main/develop
+        if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop' }}
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ secrets.SERVER_IP }} >> ~/.ssh/known_hosts
+      
+      - name: Redeploy main/develop
+        if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop' }}
+        run: |
+          ssh ${{ secrets.SSH_USER }}@${{ secrets.SERVER_IP }} "
+            cd /home/${{ secrets.SSH_USER }}/ && docker compose pull ${{ steps.meta.outputs.service_name }} && docker compose up -d ${{ steps.meta.outputs.service_name }}
+            echo 'Redeployed ${{ steps.meta.outputs.domain }}'
+          "
+          
+      - name: Notify deployment
+        run: |
+          echo "Deployed to https://${{ steps.meta.outputs.domain }}"
