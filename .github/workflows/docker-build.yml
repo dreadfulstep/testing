@@ -68,55 +68,19 @@ jobs:
             org.opencontainers.image.version=${{ steps.meta.outputs.branch }}
             app.kubernetes.io/name=${{ steps.meta.outputs.subdomain }}
 
-      - name: Debug SSH Setup (Port 2222)
-        run: |
-          echo "Checking SSH Environment..."
-          env | grep SSH
-          echo "Checking SSH Directory..."
-          ls -lah ~/.ssh || echo "No .ssh directory!"
-          echo "Checking SSH Known Hosts..."
-          cat ~/.ssh/known_hosts || echo "No known_hosts file!"
-          echo "Testing SSH Connection..."
-          ssh -o StrictHostKeyChecking=no -p 2222 ${{ secrets.SSH_USER }}@${{ secrets.SERVER_IP }} "echo 'SSH Connection Successful'"
-
-      - name: Setup SSH Agent
-        uses: webfactory/ssh-agent@v0.7.0
-        with:
-          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
-
-      - name: Fix SSH Permissions & Known Hosts (Port 2222)
-        run: |
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
-          ssh-keyscan -p 2222 -H ${{ secrets.SERVER_IP }} >> ~/.ssh/known_hosts
-          chmod 600 ~/.ssh/known_hosts
-
       - name: Update docker-compose.yml on server
         run: |
           echo "$SERVICE_ENTRY" > service_entry.txt
           scp -P 2222 service_entry.txt ${{ secrets.SSH_USER }}@${{ secrets.SERVER_IP }}:/tmp/service_entry.txt
 
-          ssh -p 2222 ${{ secrets.SSH_USER }}@${{ secrets.SERVER_IP }} "
-            if grep -q \"${{ steps.meta.outputs.service_name }}:\" /home/${{ secrets.SSH_USER }}/docker-compose.yml; then
-              echo 'Service already exists in docker-compose.yml'
-            else
-              sed -i '/^networks:/i \\n  ${{ steps.meta.outputs.service_name }}:' /home/${{ secrets.SSH_USER }}/docker-compose.yml
-              sed -i '/^  ${{ steps.meta.outputs.service_name }}:/r /tmp/service_entry.txt' /home/${{ secrets.SSH_USER }}/docker-compose.yml
-              
-              cd /home/${{ secrets.SSH_USER }}/ && docker compose up -d ${{ steps.meta.outputs.service_name }}
-              
-              echo 'Deployed ${{ steps.meta.outputs.domain }}'
-            fi
-          "
-
-      - name: Redeploy main/develop
+      - name: Redeploy main/develop with Watchtower
         if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop' }}
         run: |
           ssh -p 2222 ${{ secrets.SSH_USER }}@${{ secrets.SERVER_IP }} "
             cd /home/${{ secrets.SSH_USER }}/ && docker compose pull ${{ steps.meta.outputs.service_name }} && docker compose up -d ${{ steps.meta.outputs.service_name }}
             echo 'Redeployed ${{ steps.meta.outputs.domain }}'
           "
-
+          
       - name: Notify deployment
         run: |
           echo "Deployed to https://${{ steps.meta.outputs.domain }}"
