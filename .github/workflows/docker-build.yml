@@ -1,9 +1,9 @@
 name: Build and Push Docker Image
 on:
   push:
-    branches: [ main, develop ]
+    branches-ignore: [main, develop]
   pull_request:
-    branches: [ main ]
+    branches-ignore: [main]
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
